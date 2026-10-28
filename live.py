@@ -10,6 +10,8 @@ BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
 API_URL = "https://v3.football.api-sports.io"
+FICHEIRO_HISTORICO = "live_alerts.json"
+DIAS_HISTORICO = 7
 
 LIGAS = {
     39: "Premier League",
@@ -28,19 +30,23 @@ def pedido_api(endpoint, parametros=None):
         url += "?" + urllib.parse.urlencode(parametros)
 
     pedido = urllib.request.Request(
-        url, headers={"x-apisports-key": API_KEY}
+        url,
+        headers={"x-apisports-key": API_KEY}
     )
 
     with urllib.request.urlopen(pedido, timeout=25) as resposta:
         dados = json.loads(resposta.read().decode("utf-8"))
 
     if dados.get("errors"):
-        raise RuntimeError("Erro da API-Football: " + str(dados["errors"]))
+        raise RuntimeError(
+            "Erro da API-Football: " + str(dados["errors"])
+        )
 
     return dados.get("response", [])
 
 def enviar_telegram(mensagem):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+
     dados = json.dumps({
         "chat_id": CHAT_ID,
         "text": mensagem,
@@ -48,7 +54,8 @@ def enviar_telegram(mensagem):
     }).encode("utf-8")
 
     pedido = urllib.request.Request(
-        url, data=dados,
+        url,
+        data=dados,
         headers={"Content-Type": "application/json"}
     )
 
@@ -56,23 +63,61 @@ def enviar_telegram(mensagem):
         resultado = json.loads(resposta.read().decode("utf-8"))
 
     if not resultado.get("ok"):
-        raise RuntimeError("Falha ao enviar mensagem ao Telegram.")
+        raise RuntimeError("O Telegram não aceitou a mensagem.")
+
+def carregar_historico():
+    try:
+        with open(FICHEIRO_HISTORICO, "r", encoding="utf-8") as f:
+            dados = json.load(f)
+
+        if isinstance(dados, dict):
+            return dados
+
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+
+    return {}
+
+def limpar_historico(historico):
+    agora = datetime.now(timezone.utc).timestamp()
+    limite = agora - DIAS_HISTORICO * 24 * 60 * 60
+
+    return {
+        jogo_id: instante
+        for jogo_id, instante in historico.items()
+        if isinstance(instante, (int, float))
+        and instante >= limite
+    }
+
+def guardar_historico(historico):
+    temporario = FICHEIRO_HISTORICO + ".tmp"
+
+    with open(temporario, "w", encoding="utf-8") as f:
+        json.dump(historico, f, ensure_ascii=False, indent=2)
+
+    os.replace(temporario, FICHEIRO_HISTORICO)
 
 def numero_estatistica(equipa, nome):
     for item in equipa.get("statistics", []):
         if item.get("type") == nome:
             valor = item.get("value")
+
             if valor is None:
                 return 0
+
             if isinstance(valor, str):
                 valor = valor.replace("%", "").strip()
+
             try:
                 return float(valor)
             except (ValueError, TypeError):
                 return 0
+
     return 0
 
 def main():
+    historico = limpar_historico(carregar_historico())
+
     ids_ligas = "-".join(str(x) for x in LIGAS)
     jogos = pedido_api("/fixtures", {"live": ids_ligas})
 
@@ -84,36 +129,45 @@ def main():
         status = fixture.get("status", {}).get("short")
         minuto = fixture.get("status", {}).get("elapsed")
         golos = jogo.get("goals", {})
+
         casa = golos.get("home")
         fora = golos.get("away")
+        id_jogo = fixture.get("id")
 
         if liga.get("id") not in LIGAS:
             continue
+
         if status not in ("1H", "2H", "HT", "ET", "LIVE"):
             continue
+
         if not isinstance(minuto, int) or not 55 <= minuto <= 80:
             continue
-        if casa is None or fora is None:
+
+        if casa is None or fora is None or casa + fora > 2:
             continue
-        if casa + fora > 2:
+
+        if id_jogo is None or str(id_jogo) in historico:
             continue
 
         candidatos.append(jogo)
 
     if not candidatos:
-        print("Verificação concluída: sem jogos elegíveis.")
+        print("Sem jogos novos elegíveis para alerta.")
+        guardar_historico(historico)
         return
 
-    # Apenas um jogo por execução para limitar as consultas.
+    # Apenas um jogo é analisado com estatísticas por execução.
     jogo = candidatos[0]
+
     fixture = jogo["fixture"]
     equipas = jogo["teams"]
     golos = jogo["goals"]
     liga = jogo["league"]
-    id_jogo = fixture["id"]
+    id_jogo = str(fixture["id"])
 
     estatisticas = pedido_api(
-        "/fixtures/statistics", {"fixture": id_jogo}
+        "/fixtures/statistics",
+        {"fixture": id_jogo}
     )
 
     if len(estatisticas) < 2:
@@ -121,24 +175,34 @@ def main():
         return
 
     remates_baliza = sum(
-        numero_estatistica(e, "Shots on Goal") for e in estatisticas
+        numero_estatistica(e, "Shots on Goal")
+        for e in estatisticas
     )
+
     remates_totais = sum(
-        numero_estatistica(e, "Total Shots") for e in estatisticas
+        numero_estatistica(e, "Total Shots")
+        for e in estatisticas
     )
+
     cantos = sum(
-        numero_estatistica(e, "Corner Kicks") for e in estatisticas
+        numero_estatistica(e, "Corner Kicks")
+        for e in estatisticas
     )
 
     print(
-        f"Análise: {equipas['home']['name']} - "
-        f"{equipas['away']['name']}; minuto "
-        f"{fixture['status']['elapsed']}; remates à baliza "
-        f"{remates_baliza}; remates totais {remates_totais}; "
-        f"cantos {cantos}"
+        f"Jogo: {equipas['home']['name']} - "
+        f"{equipas['away']['name']} | "
+        f"Minuto {fixture['status']['elapsed']} | "
+        f"Remates à baliza: {remates_baliza} | "
+        f"Remates totais: {remates_totais} | "
+        f"Cantos: {cantos}"
     )
 
-    if remates_baliza < 3 or remates_totais < 10 or cantos < 4:
+    if (
+        remates_baliza < 3
+        or remates_totais < 10
+        or cantos < 4
+    ):
         print("Critérios de alerta não atingidos.")
         return
 
@@ -148,18 +212,23 @@ def main():
 
     mensagem = (
         "⚽ ALERTA LIVE — PRESSÃO OFENSIVA\n\n"
-        f"🏆 {LIGAS.get(liga['id'], liga.get('name', 'Competição'))}\n"
+        f"🏆 {LIGAS.get(liga['id'], 'Competição')}\n"
         f"⚔️ {casa} {golos['home']} - {golos['away']} {fora}\n"
         f"⏱️ Minuto: {minuto}'\n\n"
         f"🎯 Remates à baliza: {int(remates_baliza)}\n"
         f"🥅 Remates totais: {int(remates_totais)}\n"
         f"🚩 Cantos: {int(cantos)}\n\n"
-        "ℹ️ Indicadores estatísticos de pressão ofensiva; "
-        "não garantem que saia outro golo."
+        "ℹ️ Indicadores de pressão ofensiva; não garantem "
+        "que saia outro golo."
     )
 
+    # Só guardar o jogo depois de o Telegram aceitar a mensagem.
     enviar_telegram(mensagem)
-    print("Alerta enviado.")
+
+    historico[id_jogo] = datetime.now(timezone.utc).timestamp()
+    guardar_historico(historico)
+
+    print("Alerta enviado e guardado no histórico.")
 
 if __name__ == "__main__":
     main()
