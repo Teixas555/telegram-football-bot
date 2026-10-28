@@ -67,11 +67,12 @@ def pedido_api(endpoint, parametros=None):
     if consumo["count"] >= LIMITE_LIVE:
         raise RuntimeError("LIMITE_DIARIO_LIVE_ATINGIDO")
 
-    # Registar antes do pedido, incluindo tentativas falhadas.
+    # Registar a tentativa antes de fazer o pedido.
     consumo["count"] += 1
     guardar_json(FICHEIRO_CONSUMO, consumo)
 
     url = API_URL + endpoint
+
     if parametros:
         url += "?" + urllib.parse.urlencode(parametros)
 
@@ -149,85 +150,120 @@ def numero_estatistica(equipa, nome):
     return 0
 
 
+def classificar_pressao(remates_baliza, remates_totais, cantos):
+    if (
+        remates_baliza >= 7
+        and remates_totais >= 18
+        and cantos >= 8
+    ):
+        return (
+            "NÍVEL 3 — PRESSÃO MUITO FORTE",
+            "🔥",
+            "Indicadores estatísticos muito elevados."
+        )
+
+    if (
+        remates_baliza >= 5
+        and remates_totais >= 14
+        and cantos >= 6
+    ):
+        return (
+            "NÍVEL 2 — PRESSÃO FORTE",
+            "🟠",
+            "Indicadores estatísticos fortes."
+        )
+
+    if (
+        remates_baliza >= 3
+        and remates_totais >= 10
+        and cantos >= 4
+    ):
+        return (
+            "NÍVEL 1 — PRESSÃO MODERADA",
+            "🟡",
+            "Indicadores estatísticos acima dos mínimos."
+        )
+
+    return (
+        "SEM NÍVEL",
+        "⚪",
+        "Os critérios mínimos não foram atingidos."
+    )
+
+
 def sugerir_mercados(
     casa, fora, minuto,
     golos_casa, golos_fora,
     remates_baliza, remates_totais, cantos
 ):
     sugestoes = []
-
     total_golos = golos_casa + golos_fora
 
-    # GOLOS: o mercado exige pelo menos mais um golo
-    # para ultrapassar a linha indicada.
+    # Mercado de golos: linha imediatamente acima
+    # do total atual. Não é uma previsão de probabilidade.
     if minuto <= 80 and total_golos <= 2:
         linha_golos = total_golos + 0.5
-
         sugestoes.append(
-            f"⚽ Golos: Mais de {linha_golos:.1f} golos "
-            "no jogo"
+            f"⚽ Golos: Mais de {linha_golos:.1f} "
+            "golos no jogo — analisar"
         )
 
-    # CANTOS: linha imediatamente acima do total atual.
-    # É uma opção a analisar, não uma previsão garantida.
+    # Mercado de cantos: linha acima do total atual.
     if minuto <= 80 and cantos >= 4:
-        linha_cantos = cantos + 0.5
-
+        linha_cantos = int(cantos) + 0.5
         sugestoes.append(
             f"🚩 Cantos: Mais de {linha_cantos:.1f} "
-            "cantos no jogo"
+            "cantos no jogo — analisar"
         )
 
-    # VITÓRIA/EMPATE: só sugerir dupla hipótese quando
-    # o marcador e os dados individuais não contradizem
-    # claramente a escolha.
-    remates_baliza_casa = numero_estatistica(
+    # Estatísticas individuais para o mercado de resultado.
+    baliza_casa = numero_estatistica(
         casa, "Shots on Goal"
     )
-    remates_baliza_fora = numero_estatistica(
+    baliza_fora = numero_estatistica(
         fora, "Shots on Goal"
     )
-    remates_casa = numero_estatistica(casa, "Total Shots")
-    remates_fora = numero_estatistica(fora, "Total Shots")
+    total_casa = numero_estatistica(
+        casa, "Total Shots"
+    )
+    total_fora = numero_estatistica(
+        fora, "Total Shots"
+    )
 
-    diferenca_golos = golos_casa - golos_fora
+    diferenca = golos_casa - golos_fora
 
-    if diferenca_golos == 0:
+    if diferenca == 0:
         if (
-            remates_baliza_casa >= remates_baliza_fora + 2
-            and remates_casa >= remates_fora
+            baliza_casa >= baliza_fora + 2
+            and total_casa >= total_fora
         ):
             sugestoes.append(
-                "🏆 Resultado: Dupla hipótese "
-                "Casa ou Empate (1X) — analisar"
+                "🏆 Resultado: Casa ou Empate (1X) — analisar"
             )
         elif (
-            remates_baliza_fora >= remates_baliza_casa + 2
-            and remates_fora >= remates_casa
+            baliza_fora >= baliza_casa + 2
+            and total_fora >= total_casa
         ):
             sugestoes.append(
-                "🏆 Resultado: Dupla hipótese "
-                "Visitante ou Empate (X2) — analisar"
+                "🏆 Resultado: Visitante ou Empate (X2) — analisar"
             )
 
-    elif diferenca_golos > 0:
+    elif diferenca > 0:
         if (
-            remates_baliza_casa >= remates_baliza_fora
-            and remates_casa >= remates_fora
+            baliza_casa >= baliza_fora
+            and total_casa >= total_fora
         ):
             sugestoes.append(
-                "🏆 Resultado: Dupla hipótese "
-                "Casa ou Empate (1X) — analisar"
+                "🏆 Resultado: Casa ou Empate (1X) — analisar"
             )
 
     else:
         if (
-            remates_baliza_fora >= remates_baliza_casa
-            and remates_fora >= remates_casa
+            baliza_fora >= baliza_casa
+            and total_fora >= total_casa
         ):
             sugestoes.append(
-                "🏆 Resultado: Dupla hipótese "
-                "Visitante ou Empate (X2) — analisar"
+                "🏆 Resultado: Visitante ou Empate (X2) — analisar"
             )
 
     return sugestoes
@@ -276,8 +312,7 @@ def main():
 
         candidatos.append(jogo)
 
-    # No máximo um jogo recebe consulta de estatísticas
-    # por execução, tal como na versão anterior.
+    # Máximo de uma consulta de estatísticas por execução.
     for jogo in candidatos:
         consumo = carregar_consumo()
 
@@ -292,14 +327,14 @@ def main():
         id_jogo = str(fixture["id"])
 
         estatisticas = pedido_api(
-            "/fixtures/statistics", {"fixture": id_jogo}
+            "/fixtures/statistics",
+            {"fixture": id_jogo}
         )
 
         if len(estatisticas) < 2:
             print("Estatísticas insuficientes.")
             return
 
-        # Manter as estatísticas de cada equipa separadas.
         casa_stats = estatisticas[0]
         fora_stats = estatisticas[1]
 
@@ -324,12 +359,16 @@ def main():
             f"{cantos} cantos."
         )
 
-        if (
-            remates_baliza < 3
-            or remates_totais < 10
-            or cantos < 4
-        ):
-            print("Critérios de alerta não atingidos.")
+        nivel, emoji_nivel, descricao_nivel = (
+            classificar_pressao(
+                remates_baliza,
+                remates_totais,
+                cantos
+            )
+        )
+
+        if nivel == "SEM NÍVEL":
+            print("Critérios mínimos de pressão não atingidos.")
             return
 
         minuto = fixture["status"]["elapsed"]
@@ -347,20 +386,21 @@ def main():
             cantos
         )
 
-        if not sugestoes:
-            texto_sugestoes = (
-                "Não há dados suficientes para sugerir "
-                "um mercado de resultado com prudência."
-            )
-        else:
+        if sugestoes:
             texto_sugestoes = "\n".join(
                 f"• {sugestao}" for sugestao in sugestoes
+            )
+        else:
+            texto_sugestoes = (
+                "Não existem indicadores suficientes "
+                "para sugerir um mercado de resultado."
             )
 
         mensagem = (
             "👑 RB TIPS\n"
             "━━━━━━━━━━━━━━━━━━\n"
-            "🔴 ALERTA LIVE | ANÁLISE DO JOGO\n"
+            f"{emoji_nivel} {nivel}\n"
+            f"{descricao_nivel}\n"
             "━━━━━━━━━━━━━━━━━━\n\n"
             f"🏆 {LIGAS.get(liga['id'], 'Competição')}\n"
             f"⚽ {equipas['home']['name']} "
@@ -375,11 +415,11 @@ def main():
             "💡 MERCADOS A ANALISAR\n"
             "──────────────────\n"
             f"{texto_sugestoes}\n\n"
-            "⚠️ As sugestões são heurísticas baseadas "
-            "nas estatísticas disponíveis. Não são "
-            "probabilidades calculadas nem garantias. "
-            "Confirma a linha e as odds disponíveis "
-            "antes de tomares qualquer decisão.\n"
+            "⚠️ O nível mede apenas os indicadores "
+            "estatísticos definidos. Não representa uma "
+            "probabilidade calculada nem garante golos, "
+            "resultados ou lucro. Confirma sempre as odds "
+            "e o contexto do jogo.\n"
             "━━━━━━━━━━━━━━━━━━\n"
             "🖤 RB TIPS | Analisar antes de apostar"
         )
@@ -391,7 +431,7 @@ def main():
         )
         guardar_json(FICHEIRO_HISTORICO, historico)
 
-        print("Alerta enviado e guardado.")
+        print(f"Alerta enviado: {nivel}.")
         return
 
     print("Verificação concluída; nenhum alerta novo.")
