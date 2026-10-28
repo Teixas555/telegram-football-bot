@@ -14,7 +14,6 @@ API_URL = "https://v3.football.api-sports.io"
 MAX_JOGOS = 20
 FUSO = ZoneInfo("Europe/Lisbon")
 
-# Apenas as 5 grandes ligas e as 3 competições europeias
 LIGAS_PERMITIDAS = {
     39: "Premier League",
     140: "La Liga",
@@ -89,24 +88,24 @@ def percentagem(valor):
     return str(valor)
 
 
-def main():
-    hoje = datetime.now(FUSO).date().isoformat()
-
-    mensagem = [
-        "⚽ PREVISÕES — GRANDES LIGAS EUROPEIAS",
+def cabecalho(hoje):
+    return [
+        "👑 RB TIPS",
+        "━━━━━━━━━━━━━━━━━━",
+        "⚽ ANÁLISE PRÉ-JOGO",
         f"📅 {hoje}",
         "",
-        "🏆 Premier League | La Liga | Serie A",
-        "🏆 Bundesliga | Ligue 1",
-        "🏆 Champions League | Liga Europa",
-        "🏆 Liga Conferência",
-        "",
-        "Previsões estatísticas — não são garantias."
+        "📊 PREVISÕES ESTATÍSTICAS",
+        "━━━━━━━━━━━━━━━━━━",
     ]
+
+
+def main():
+    hoje = datetime.now(FUSO).date().isoformat()
+    mensagem = cabecalho(hoje)
 
     jogos = pedido_api("/fixtures", {"date": hoje})
 
-    # Filtrar as competições ANTES de selecionar os jogos
     jogos = [
         jogo for jogo in jogos
         if jogo.get("league", {}).get("id") in LIGAS_PERMITIDAS
@@ -120,9 +119,17 @@ def main():
 
     if not jogos:
         enviar_telegram(
-            f"⚽ PREVISÕES — GRANDES LIGAS EUROPEIAS\n"
-            f"📅 {hoje}\n\n"
-            "Não há jogos futuros das 8 competições selecionadas hoje."
+            "\n".join([
+                "👑 RB TIPS",
+                "━━━━━━━━━━━━━━━━━━",
+                "⚽ ANÁLISE PRÉ-JOGO",
+                f"📅 {hoje}",
+                "",
+                "📭 Não há jogos futuros disponíveis",
+                "nas oito competições acompanhadas hoje.",
+                "",
+                "🖤 RB TIPS | Analisar antes de apostar",
+            ])
         )
         return
 
@@ -132,16 +139,19 @@ def main():
         fixture = jogo.get("fixture", {})
         equipas = jogo.get("teams", {})
         liga = jogo.get("league", {})
-
         id_jogo = fixture.get("id")
-        casa = equipas.get("home", {}).get("name", "Equipa da casa")
-        fora = equipas.get("away", {}).get("name", "Equipa visitante")
+
+        casa = equipas.get("home", {}).get(
+            "name", "Equipa da casa"
+        )
+        fora = equipas.get("away", {}).get(
+            "name", "Equipa visitante"
+        )
         campeonato = LIGAS_PERMITIDAS.get(
             liga.get("id"), liga.get("name", "Competição")
         )
 
         hora = fixture.get("date", "")
-
         try:
             hora_local = datetime.fromisoformat(
                 hora.replace("Z", "+00:00")
@@ -150,7 +160,9 @@ def main():
             hora_local = "--:--"
 
         try:
-            previsoes = pedido_api("/predictions", {"fixture": id_jogo})
+            previsoes = pedido_api(
+                "/predictions", {"fixture": id_jogo}
+            )
         except Exception:
             continue
 
@@ -160,41 +172,51 @@ def main():
         previsao = previsoes[0].get("predictions", {})
         percent = previsao.get("percent") or {}
 
-        mensagem_jogo = (
-            f"🏆 {campeonato}\n"
-            f"🕒 {hora_local} — hora de Portugal\n"
-            f"⚔️ {casa} - {fora}\n"
-            f"📊 1X2 (estimativa):\n"
-            f"  🏠 Casa: {percentagem(percent.get('home'))}\n"
-            f"  🤝 Empate: {percentagem(percent.get('draw'))}\n"
-            f"  ✈️ Fora: {percentagem(percent.get('away'))}\n"
-            f"⚽ Golos: "
-            f"{tendencia_golos(previsao.get('under_over'))}"
-        )
+        mensagem_jogo = [
+            f"🏆 {campeonato.upper()}",
+            f"🕒 {hora_local} | Hora de Portugal",
+            "",
+            f"⚔️ {casa}",
+            f"       VS",
+            f"⚔️ {fora}",
+            "",
+            "🎯 MERCADO 1X2 — ESTIMATIVA",
+            f"🏠 Vitória da casa: {percentagem(percent.get('home'))}",
+            f"🤝 Empate: {percentagem(percent.get('draw'))}",
+            f"✈️ Vitória fora: {percentagem(percent.get('away'))}",
+            "",
+            f"⚽ Tendência de golos: "
+            f"{tendencia_golos(previsao.get('under_over'))}",
+            "──────────────────",
+        ]
 
-        mensagem.append("")
-        mensagem.append(mensagem_jogo)
+        mensagem.extend(mensagem_jogo)
         analisados += 1
 
     if analisados == 0:
         mensagem.extend([
             "",
-            "Não foram encontradas previsões disponíveis "
-            "para os jogos elegíveis de hoje."
+            "📭 Não foram encontradas previsões disponíveis",
+            "para os jogos elegíveis de hoje.",
         ])
     else:
         mensagem.extend([
             "",
-            f"✅ Jogos com previsões: {analisados}",
-            "ℹ️ As percentagens e tendências podem não estar "
-            "disponíveis para todos os jogos."
+            "━━━━━━━━━━━━━━━━━━",
+            f"✅ Jogos analisados: {analisados}",
+            "",
+            "ℹ️ As percentagens são estimativas,",
+            "não garantias de resultado.",
+            "",
+            "🖤 RB TIPS | Analisar antes de apostar",
+            "🎯 Joga com responsabilidade.",
         ])
 
     texto = "\n".join(mensagem)
 
     if len(texto) > 3900:
         texto = texto[:3850] + (
-            "\n\nMensagem abreviada para caber no Telegram."
+            "\n\n📌 Resumo abreviado para caber no Telegram."
         )
 
     enviar_telegram(texto)
@@ -205,7 +227,7 @@ if __name__ == "__main__":
         main()
     except Exception:
         enviar_telegram(
-            "⚠️ O bot encontrou um erro ao consultar a API. "
-            "Verifica a API key e a quota diária."
+            "⚠️ RB TIPS | Não foi possível atualizar "
+            "as previsões. Verifica a execução no GitHub Actions."
         )
         raise
