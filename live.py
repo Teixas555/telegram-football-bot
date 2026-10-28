@@ -67,12 +67,11 @@ def pedido_api(endpoint, parametros=None):
     if consumo["count"] >= LIMITE_LIVE:
         raise RuntimeError("LIMITE_DIARIO_LIVE_ATINGIDO")
 
-    # Contar a tentativa antes de fazer o pedido.
+    # Registar antes do pedido, incluindo tentativas falhadas.
     consumo["count"] += 1
     guardar_json(FICHEIRO_CONSUMO, consumo)
 
     url = API_URL + endpoint
-
     if parametros:
         url += "?" + urllib.parse.urlencode(parametros)
 
@@ -150,6 +149,90 @@ def numero_estatistica(equipa, nome):
     return 0
 
 
+def sugerir_mercados(
+    casa, fora, minuto,
+    golos_casa, golos_fora,
+    remates_baliza, remates_totais, cantos
+):
+    sugestoes = []
+
+    total_golos = golos_casa + golos_fora
+
+    # GOLOS: o mercado exige pelo menos mais um golo
+    # para ultrapassar a linha indicada.
+    if minuto <= 80 and total_golos <= 2:
+        linha_golos = total_golos + 0.5
+
+        sugestoes.append(
+            f"⚽ Golos: Mais de {linha_golos:.1f} golos "
+            "no jogo"
+        )
+
+    # CANTOS: linha imediatamente acima do total atual.
+    # É uma opção a analisar, não uma previsão garantida.
+    if minuto <= 80 and cantos >= 4:
+        linha_cantos = cantos + 0.5
+
+        sugestoes.append(
+            f"🚩 Cantos: Mais de {linha_cantos:.1f} "
+            "cantos no jogo"
+        )
+
+    # VITÓRIA/EMPATE: só sugerir dupla hipótese quando
+    # o marcador e os dados individuais não contradizem
+    # claramente a escolha.
+    remates_baliza_casa = numero_estatistica(
+        casa, "Shots on Goal"
+    )
+    remates_baliza_fora = numero_estatistica(
+        fora, "Shots on Goal"
+    )
+    remates_casa = numero_estatistica(casa, "Total Shots")
+    remates_fora = numero_estatistica(fora, "Total Shots")
+
+    diferenca_golos = golos_casa - golos_fora
+
+    if diferenca_golos == 0:
+        if (
+            remates_baliza_casa >= remates_baliza_fora + 2
+            and remates_casa >= remates_fora
+        ):
+            sugestoes.append(
+                "🏆 Resultado: Dupla hipótese "
+                "Casa ou Empate (1X) — analisar"
+            )
+        elif (
+            remates_baliza_fora >= remates_baliza_casa + 2
+            and remates_fora >= remates_casa
+        ):
+            sugestoes.append(
+                "🏆 Resultado: Dupla hipótese "
+                "Visitante ou Empate (X2) — analisar"
+            )
+
+    elif diferenca_golos > 0:
+        if (
+            remates_baliza_casa >= remates_baliza_fora
+            and remates_casa >= remates_fora
+        ):
+            sugestoes.append(
+                "🏆 Resultado: Dupla hipótese "
+                "Casa ou Empate (1X) — analisar"
+            )
+
+    else:
+        if (
+            remates_baliza_fora >= remates_baliza_casa
+            and remates_fora >= remates_casa
+        ):
+            sugestoes.append(
+                "🏆 Resultado: Dupla hipótese "
+                "Visitante ou Empate (X2) — analisar"
+            )
+
+    return sugestoes
+
+
 def main():
     historico = limpar_historico(carregar_historico())
     guardar_json(FICHEIRO_HISTORICO, historico)
@@ -162,8 +245,8 @@ def main():
         return
 
     ids_ligas = "-".join(str(x) for x in LIGAS)
-
     jogos = pedido_api("/fixtures", {"live": ids_ligas})
+
     candidatos = []
 
     for jogo in jogos:
@@ -193,7 +276,8 @@ def main():
 
         candidatos.append(jogo)
 
-    # No máximo um pedido de estatísticas por execução.
+    # No máximo um jogo recebe consulta de estatísticas
+    # por execução, tal como na versão anterior.
     for jogo in candidatos:
         consumo = carregar_consumo()
 
@@ -208,24 +292,25 @@ def main():
         id_jogo = str(fixture["id"])
 
         estatisticas = pedido_api(
-            "/fixtures/statistics",
-            {"fixture": id_jogo}
+            "/fixtures/statistics", {"fixture": id_jogo}
         )
 
         if len(estatisticas) < 2:
             print("Estatísticas insuficientes.")
             return
 
+        # Manter as estatísticas de cada equipa separadas.
+        casa_stats = estatisticas[0]
+        fora_stats = estatisticas[1]
+
         remates_baliza = sum(
             numero_estatistica(e, "Shots on Goal")
             for e in estatisticas
         )
-
         remates_totais = sum(
             numero_estatistica(e, "Total Shots")
             for e in estatisticas
         )
-
         cantos = sum(
             numero_estatistica(e, "Corner Kicks")
             for e in estatisticas
@@ -244,41 +329,57 @@ def main():
             or remates_totais < 10
             or cantos < 4
         ):
-            print("Critérios não atingidos.")
+            print("Critérios de alerta não atingidos.")
             return
 
         minuto = fixture["status"]["elapsed"]
-        total_golos = golos["home"] + golos["away"]
+        golos_casa = golos["home"]
+        golos_fora = golos["away"]
 
-        # Mercado sugerido: precisa de mais um golo
-        # para haver mais de 0,5 golos até ao final.
-        mercado = "Mais de 0,5 golos até ao final do jogo"
+        sugestoes = sugerir_mercados(
+            casa_stats,
+            fora_stats,
+            minuto,
+            golos_casa,
+            golos_fora,
+            remates_baliza,
+            remates_totais,
+            cantos
+        )
+
+        if not sugestoes:
+            texto_sugestoes = (
+                "Não há dados suficientes para sugerir "
+                "um mercado de resultado com prudência."
+            )
+        else:
+            texto_sugestoes = "\n".join(
+                f"• {sugestao}" for sugestao in sugestoes
+            )
 
         mensagem = (
             "👑 RB TIPS\n"
             "━━━━━━━━━━━━━━━━━━\n"
-            "🔴 ALERTA LIVE | PRESSÃO OFENSIVA\n"
+            "🔴 ALERTA LIVE | ANÁLISE DO JOGO\n"
             "━━━━━━━━━━━━━━━━━━\n\n"
             f"🏆 {LIGAS.get(liga['id'], 'Competição')}\n"
             f"⚽ {equipas['home']['name']} "
-            f"{golos['home']} - {golos['away']} "
+            f"{golos_casa} - {golos_fora} "
             f"{equipas['away']['name']}\n"
             f"⏱️ Minuto de jogo: {minuto}'\n\n"
-            "📊 ESTATÍSTICAS DO JOGO\n"
+            "📊 ESTATÍSTICAS\n"
             "──────────────────\n"
             f"🎯 Remates à baliza: {int(remates_baliza)}\n"
             f"🥅 Remates totais: {int(remates_totais)}\n"
             f"🚩 Cantos: {int(cantos)}\n\n"
-            "💡 MERCADO A ANALISAR\n"
-            f"⚽ {mercado}\n"
-            f"📌 Resultado atual: {total_golos} golos\n\n"
-            "📈 MOTIVO DA SUGESTÃO\n"
-            "O jogo atingiu os critérios estatísticos "
-            "de pressão ofensiva definidos pela RB TIPS.\n\n"
-            "⚠️ A sugestão não representa uma probabilidade "
-            "calculada nem uma aposta garantida. "
-            "Confirma as odds e o contexto do jogo antes "
-            "de tomares qualquer decisão.\n"
+            "💡 MERCADOS A ANALISAR\n"
+            "──────────────────\n"
+            f"{texto_sugestoes}\n\n"
+            "⚠️ As sugestões são heurísticas baseadas "
+            "nas estatísticas disponíveis. Não são "
+            "probabilidades calculadas nem garantias. "
+            "Confirma a linha e as odds disponíveis "
+            "antes de tomares qualquer decisão.\n"
             "━━━━━━━━━━━━━━━━━━\n"
             "🖤 RB TIPS | Analisar antes de apostar"
         )
