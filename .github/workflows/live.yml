@@ -34,15 +34,13 @@ jobs:
           API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
         run: python live.py
 
-      - name: Guardar histórico dos alertas
+      - name: Guardar histórico e consumo
         if: always()
         run: |
-          if [ -f live_alerts.json ]; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add live_alerts.json
-            if ! git diff --cached --quiet; then
-              git commit -m "Atualizar histórico de alertas LIVE"
-              git push origin HEAD:main
-            fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add live_alerts.json live_usage.json
+          if ! git diff --cached --quiet; then
+            git commit -m "Atualizar histórico e consumo LIVE"
+            git push origin HEAD:main
           fi
