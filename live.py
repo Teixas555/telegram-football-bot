@@ -3,6 +3,7 @@ import os
 import json
 import urllib.request
 import urllib.parse
+from datetime import datetime, timezone
 
 API_KEY = os.environ["API_FOOTBALL_KEY"]
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
@@ -10,7 +11,7 @@ CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
 API_URL = "https://v3.football.api-sports.io"
 
-LIGAS_PERMITIDAS = {
+LIGAS = {
     39: "Premier League",
     140: "La Liga",
     135: "Serie A",
@@ -34,7 +35,7 @@ def pedido_api(endpoint, parametros=None):
         dados = json.loads(resposta.read().decode("utf-8"))
 
     if dados.get("errors"):
-        raise RuntimeError("A API-Football devolveu um erro.")
+        raise RuntimeError("Erro da API-Football: " + str(dados["errors"]))
 
     return dados.get("response", [])
 
@@ -47,8 +48,7 @@ def enviar_telegram(mensagem):
     }).encode("utf-8")
 
     pedido = urllib.request.Request(
-        url,
-        data=dados,
+        url, data=dados,
         headers={"Content-Type": "application/json"}
     )
 
@@ -56,60 +56,110 @@ def enviar_telegram(mensagem):
         resultado = json.loads(resposta.read().decode("utf-8"))
 
     if not resultado.get("ok"):
-        raise RuntimeError("O Telegram não aceitou a mensagem.")
+        raise RuntimeError("Falha ao enviar mensagem ao Telegram.")
+
+def numero_estatistica(equipa, nome):
+    for item in equipa.get("statistics", []):
+        if item.get("type") == nome:
+            valor = item.get("value")
+            if valor is None:
+                return 0
+            if isinstance(valor, str):
+                valor = valor.replace("%", "").strip()
+            try:
+                return float(valor)
+            except (ValueError, TypeError):
+                return 0
+    return 0
 
 def main():
-    ligas = "-".join(str(liga) for liga in LIGAS_PERMITIDAS)
+    ids_ligas = "-".join(str(x) for x in LIGAS)
+    jogos = pedido_api("/fixtures", {"live": ids_ligas})
 
-    jogos = pedido_api("/fixtures", {"live": ligas})
+    candidatos = []
 
-    jogos = [
-        jogo for jogo in jogos
-        if jogo.get("league", {}).get("id") in LIGAS_PERMITIDAS
-        and jogo.get("fixture", {}).get("status", {}).get("short")
-        in ("1H", "2H", "HT", "ET", "LIVE")
-    ]
+    for jogo in jogos:
+        liga = jogo.get("league", {})
+        fixture = jogo.get("fixture", {})
+        status = fixture.get("status", {}).get("short")
+        minuto = fixture.get("status", {}).get("elapsed")
+        golos = jogo.get("goals", {})
+        casa = golos.get("home")
+        fora = golos.get("away")
 
-    mensagem = [
-        "🤖 BOT LIVE — VERIFICAÇÃO CONCLUÍDA",
-        "",
-        "✅ O bot executou e conseguiu consultar a API-Football.",
-        f"⚽ Jogos ao vivo nas 8 competições: {len(jogos)}",
-        "",
-    ]
+        if liga.get("id") not in LIGAS:
+            continue
+        if status not in ("1H", "2H", "HT", "ET", "LIVE"):
+            continue
+        if not isinstance(minuto, int) or not 55 <= minuto <= 80:
+            continue
+        if casa is None or fora is None:
+            continue
+        if casa + fora > 2:
+            continue
 
-    if jogos:
-        mensagem.append("📋 Jogos encontrados:")
-        for jogo in jogos[:10]:
-            equipas = jogo.get("teams", {})
-            golos = jogo.get("goals", {})
-            fixture = jogo.get("fixture", {})
-            liga_id = jogo.get("league", {}).get("id")
-            minuto = fixture.get("status", {}).get("elapsed")
-            casa = equipas.get("home", {}).get("name", "Casa")
-            fora = equipas.get("away", {}).get("name", "Fora")
-            gc = golos.get("home")
-            gf = golos.get("away")
+        candidatos.append(jogo)
 
-            mensagem.append(
-                f"🏆 {LIGAS_PERMITIDAS.get(liga_id, 'Competição')}\n"
-                f"⚔️ {casa} {gc} - {gf} {fora}\n"
-                f"⏱️ Minuto: {minuto if minuto is not None else '?'}"
-            )
-    else:
-        mensagem.append(
-            "ℹ️ Neste momento não foram encontrados jogos ao vivo "
-            "nas competições selecionadas."
-        )
+    if not candidatos:
+        print("Verificação concluída: sem jogos elegíveis.")
+        return
 
-    mensagem.extend([
-        "",
-        "ℹ️ Esta é uma mensagem de teste. Ainda não significa que "
-        "exista uma oportunidade de golo."
-    ])
+    # Apenas um jogo por execução para limitar as consultas.
+    jogo = candidatos[0]
+    fixture = jogo["fixture"]
+    equipas = jogo["teams"]
+    golos = jogo["goals"]
+    liga = jogo["league"]
+    id_jogo = fixture["id"]
 
-    enviar_telegram("\n".join(mensagem))
-    print("Mensagem de verificação enviada para o Telegram.")
+    estatisticas = pedido_api(
+        "/fixtures/statistics", {"fixture": id_jogo}
+    )
+
+    if len(estatisticas) < 2:
+        print("Estatísticas insuficientes.")
+        return
+
+    remates_baliza = sum(
+        numero_estatistica(e, "Shots on Goal") for e in estatisticas
+    )
+    remates_totais = sum(
+        numero_estatistica(e, "Total Shots") for e in estatisticas
+    )
+    cantos = sum(
+        numero_estatistica(e, "Corner Kicks") for e in estatisticas
+    )
+
+    print(
+        f"Análise: {equipas['home']['name']} - "
+        f"{equipas['away']['name']}; minuto "
+        f"{fixture['status']['elapsed']}; remates à baliza "
+        f"{remates_baliza}; remates totais {remates_totais}; "
+        f"cantos {cantos}"
+    )
+
+    if remates_baliza < 3 or remates_totais < 10 or cantos < 4:
+        print("Critérios de alerta não atingidos.")
+        return
+
+    casa = equipas["home"]["name"]
+    fora = equipas["away"]["name"]
+    minuto = fixture["status"]["elapsed"]
+
+    mensagem = (
+        "⚽ ALERTA LIVE — PRESSÃO OFENSIVA\n\n"
+        f"🏆 {LIGAS.get(liga['id'], liga.get('name', 'Competição'))}\n"
+        f"⚔️ {casa} {golos['home']} - {golos['away']} {fora}\n"
+        f"⏱️ Minuto: {minuto}'\n\n"
+        f"🎯 Remates à baliza: {int(remates_baliza)}\n"
+        f"🥅 Remates totais: {int(remates_totais)}\n"
+        f"🚩 Cantos: {int(cantos)}\n\n"
+        "ℹ️ Indicadores estatísticos de pressão ofensiva; "
+        "não garantem que saia outro golo."
+    )
+
+    enviar_telegram(mensagem)
+    print("Alerta enviado.")
 
 if __name__ == "__main__":
     main()
