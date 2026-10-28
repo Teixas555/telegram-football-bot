@@ -4,7 +4,7 @@ name: Telegram Football Bot LIVE
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 * * * *"
+   - cron: "*/10 13-23 * * *" 
 
 permissions:
   contents: read
