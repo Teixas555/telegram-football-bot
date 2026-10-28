@@ -3,7 +3,6 @@ import os
 import json
 import urllib.request
 import urllib.parse
-import urllib.error
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -14,6 +13,18 @@ CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 API_URL = "https://v3.football.api-sports.io"
 MAX_JOGOS = 20
 FUSO = ZoneInfo("Europe/Lisbon")
+
+# Apenas as 5 grandes ligas e as 3 competições europeias
+LIGAS_PERMITIDAS = {
+    39: "Premier League",
+    140: "La Liga",
+    135: "Serie A",
+    78: "Bundesliga",
+    61: "Ligue 1",
+    2: "Liga dos Campeões",
+    3: "Liga Europa",
+    848: "Liga Conferência",
+}
 
 
 def pedido_api(endpoint, parametros=None):
@@ -30,7 +41,9 @@ def pedido_api(endpoint, parametros=None):
         dados = json.loads(resposta.read().decode("utf-8"))
 
     if dados.get("errors"):
-        raise RuntimeError("A API devolveu um erro. Verifica a chave e a quota.")
+        raise RuntimeError(
+            "A API devolveu um erro. Verifica a chave e a quota."
+        )
 
     return dados.get("response", [])
 
@@ -80,25 +93,36 @@ def main():
     hoje = datetime.now(FUSO).date().isoformat()
 
     mensagem = [
-        "⚽ PREVISÕES DE FUTEBOL",
+        "⚽ PREVISÕES — GRANDES LIGAS EUROPEIAS",
         f"📅 {hoje}",
+        "",
+        "🏆 Premier League | La Liga | Serie A",
+        "🏆 Bundesliga | Ligue 1",
+        "🏆 Champions League | Liga Europa",
+        "🏆 Liga Conferência",
         "",
         "Previsões estatísticas — não são garantias."
     ]
 
     jogos = pedido_api("/fixtures", {"date": hoje})
 
+    # Filtrar as competições ANTES de selecionar os jogos
     jogos = [
         jogo for jogo in jogos
-        if jogo.get("fixture", {}).get("status", {}).get("short") in ("NS", "TBD")
+        if jogo.get("league", {}).get("id") in LIGAS_PERMITIDAS
+        and jogo.get("fixture", {}).get("status", {}).get("short")
+        in ("NS", "TBD")
     ]
 
-    jogos.sort(key=lambda jogo: jogo.get("fixture", {}).get("date", ""))
+    jogos.sort(
+        key=lambda jogo: jogo.get("fixture", {}).get("date", "")
+    )
 
     if not jogos:
         enviar_telegram(
-            f"⚽ PREVISÕES DE FUTEBOL\n📅 {hoje}\n\n"
-            "Não encontrei jogos futuros disponíveis para hoje."
+            f"⚽ PREVISÕES — GRANDES LIGAS EUROPEIAS\n"
+            f"📅 {hoje}\n\n"
+            "Não há jogos futuros das 8 competições selecionadas hoje."
         )
         return
 
@@ -112,7 +136,10 @@ def main():
         id_jogo = fixture.get("id")
         casa = equipas.get("home", {}).get("name", "Equipa da casa")
         fora = equipas.get("away", {}).get("name", "Equipa visitante")
-        campeonato = liga.get("name", "Competição")
+        campeonato = LIGAS_PERMITIDAS.get(
+            liga.get("id"), liga.get("name", "Competição")
+        )
+
         hora = fixture.get("date", "")
 
         try:
@@ -141,7 +168,8 @@ def main():
             f"  🏠 Casa: {percentagem(percent.get('home'))}\n"
             f"  🤝 Empate: {percentagem(percent.get('draw'))}\n"
             f"  ✈️ Fora: {percentagem(percent.get('away'))}\n"
-            f"⚽ Golos: {tendencia_golos(previsao.get('under_over'))}"
+            f"⚽ Golos: "
+            f"{tendencia_golos(previsao.get('under_over'))}"
         )
 
         mensagem.append("")
@@ -151,20 +179,23 @@ def main():
     if analisados == 0:
         mensagem.extend([
             "",
-            "Não foram encontradas previsões disponíveis para os jogos futuros de hoje."
+            "Não foram encontradas previsões disponíveis "
+            "para os jogos elegíveis de hoje."
         ])
     else:
         mensagem.extend([
             "",
             f"✅ Jogos com previsões: {analisados}",
-            "ℹ️ As percentagens e tendências podem não estar disponíveis para todos os jogos."
+            "ℹ️ As percentagens e tendências podem não estar "
+            "disponíveis para todos os jogos."
         ])
 
     texto = "\n".join(mensagem)
 
-    # O Telegram limita as mensagens a cerca de 4096 caracteres.
     if len(texto) > 3900:
-        texto = texto[:3850] + "\n\nMensagem abreviada para caber no Telegram."
+        texto = texto[:3850] + (
+            "\n\nMensagem abreviada para caber no Telegram."
+        )
 
     enviar_telegram(texto)
 
@@ -174,7 +205,7 @@ if __name__ == "__main__":
         main()
     except Exception:
         enviar_telegram(
-            "⚠️ O bot de previsões encontrou um erro ao consultar a API. "
-            "Verifica a API key e a quota diária no painel da API-Football."
+            "⚠️ O bot encontrou um erro ao consultar a API. "
+            "Verifica a API key e a quota diária."
         )
         raise
