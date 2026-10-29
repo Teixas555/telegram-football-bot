@@ -3,68 +3,38 @@ import re
 import requests
 from html import unescape
 
-URL = "https://betmind.org/catalogador-bacbo"
+URL = "https://cassinostats.com/pt/jogo/bac-bo/estatisticas"
 
 def main():
-    print("A testar a página pública do BETMIND...")
+    print("A testar a fonte gratuita Cassino Stats...")
 
     try:
         resposta = requests.get(
             URL,
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 Chrome/131.0 Safari/537.36"
-                )
-            },
+            headers={"User-Agent": "Mozilla/5.0"},
             timeout=25,
         )
 
         print("Código HTTP:", resposta.status_code)
-        print("Tipo de conteúdo:", resposta.headers.get(
-            "Content-Type", "desconhecido"
-        ))
-
         resposta.raise_for_status()
+
         html = resposta.text
+        texto = unescape(re.sub(r"<[^>]+>", " ", html))
+        texto = re.sub(r"\s+", " ", texto)
 
-        titulo = re.search(
-            r"<title[^>]*>(.*?)</title>",
-            html,
-            re.IGNORECASE | re.DOTALL,
-        )
+        print("Tamanho da página:", len(html))
+        print("\nResultados encontrados:")
 
-        if titulo:
-            print("Título:", unescape(titulo.group(1)).strip())
+        for palavra in ["Player", "Banker", "Empate", "Últimos resultados"]:
+            print(f"{palavra}: {'SIM' if palavra.lower() in texto.lower() else 'NÃO'}")
 
-        print("Tamanho da página:", len(html), "caracteres")
-        print("\nVerificação de palavras:")
+        print("\nExcerto da página:")
+        print(texto[:2500])
 
-        for palavra in [
-            "PLAYER",
-            "BANKER",
-            "TIE",
-            "BAC BO",
-            "BACBO",
-            "resultados",
-            "application/json",
-        ]:
-            encontrada = palavra.lower() in html.lower()
-            print(f"{palavra}: {'ENCONTRADO' if encontrada else 'NÃO ENCONTRADO'}")
-
-        texto = re.sub(r"\s+", " ", html)
-        print("\nInício do HTML recebido:")
-        print(texto[:1200])
-
-        print(
-            "\nNOTA: encontrar estas palavras não confirma que "
-            "os resultados reais estejam acessíveis."
-        )
+        print("\nTeste concluído.")
 
     except requests.RequestException as erro:
-        print("Não foi possível consultar a página.")
-        print("Erro:", erro)
-
+        print("Falha ao consultar a página:", erro)
 
 if __name__ == "__main__":
     main()
