@@ -6,70 +6,54 @@ from urllib.parse import urljoin
 BASE = "https://cassinostats.com"
 PAGINA = BASE + "/pt/jogo/bac-bo/estatisticas"
 
-TERMOS = [
-    "bac-bo",
-    "historico",
-    "últimos resultados",
-    "ultimos resultados",
-    "player",
-    "banker",
-    "rounds",
-    "history",
-    "resultados",
-    "dataset",
-    "api/",
+PADROES = [
+    r'fetch\([^)]{0,300}',
+    r'axios\.[a-z]+\([^)]{0,300}',
+    r'["\'](/api/[^"\']{1,200})["\']',
+    r'["\'](https?://[^"\']{1,200})["\']',
+    r'["\']([^"\']*(?:historico|history|rounds|resultados)[^"\']*)["\']',
 ]
 
 def main():
-    sessao = requests.Session()
-    sessao.headers["User-Agent"] = "Mozilla/5.0"
+    s = requests.Session()
+    s.headers["User-Agent"] = "Mozilla/5.0"
 
-    pagina = sessao.get(PAGINA, timeout=30)
-    print("Página HTTP:", pagina.status_code)
-    pagina.raise_for_status()
+    r = s.get(PAGINA, timeout=30)
+    print("Página HTTP:", r.status_code)
+    r.raise_for_status()
 
     scripts = re.findall(
         r'<script[^>]+src=["\']([^"\']+)',
-        pagina.text,
-        re.IGNORECASE,
+        r.text,
+        re.I
     )
 
-    vistos = set()
+    encontrados = set()
 
     for caminho in scripts:
-        url = urljoin(BASE, caminho)
-        if url in vistos:
-            continue
-        vistos.add(url)
-
         try:
-            resposta = sessao.get(url, timeout=20)
-            if resposta.status_code != 200:
+            js = s.get(urljoin(BASE, caminho), timeout=20)
+            if js.status_code != 200:
                 continue
-            codigo = resposta.text
+            codigo = js.text
         except requests.RequestException:
             continue
 
-        achados = []
-        for termo in TERMOS:
-            if termo.lower() in codigo.lower():
-                achados.append(termo)
+        if not any(x in codigo.lower() for x in
+                   ["bac-bo", "historico", "rounds", "resultados"]):
+            continue
 
-        if achados:
-            print("\nFicheiro:", caminho)
-            print("Termos encontrados:", ", ".join(achados))
+        for padrao in PADROES:
+            for m in re.finditer(padrao, codigo, re.I):
+                trecho = re.sub(r"\s+", " ", m.group(0))
+                encontrados.add((caminho, trecho[:300]))
 
-            for termo in ["historico", "ultimos resultados", "history", "dataset"]:
-                pos = codigo.lower().find(termo.lower())
-                if pos >= 0:
-                    contexto = re.sub(
-                        r"\s+", " ",
-                        codigo[max(0, pos - 180):pos + 300]
-                    )
-                    print("Contexto:", contexto[:480])
-                    break
+    print("\nPossíveis pedidos de dados encontrados:")
+    for ficheiro, trecho in sorted(encontrados):
+        print("\nFicheiro:", ficheiro)
+        print(trecho)
 
-    print("\nTeste concluído. Nenhum sinal foi enviado.")
+    print("\nTeste concluído. Nenhuma mensagem foi enviada.")
 
 if __name__ == "__main__":
     main()
