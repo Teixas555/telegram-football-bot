@@ -12,6 +12,8 @@ CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 BASE_URL = "https://api.the-odds-api.com/v4"
 REGIONS = "eu"
 MAX_SUGESTOES = 5
+TIMEOUT = 25
+FICHEIRO = Path("ai_usage.json")
 
 LIGAS = [
     ("Premier League", "soccer_epl"),
@@ -24,14 +26,13 @@ LIGAS = [
     ("Conference League", "soccer_uefa_europa_conference_league"),
 ]
 
-FICHEIRO = Path("ai_usage.json")
-TIMEOUT = 25
-
 
 def carregar_estado():
     if FICHEIRO.exists():
         try:
-            return json.loads(FICHEIRO.read_text(encoding="utf-8"))
+            estado = json.loads(FICHEIRO.read_text(encoding="utf-8"))
+            if isinstance(estado, dict):
+                return estado
         except (json.JSONDecodeError, OSError):
             pass
 
@@ -47,15 +48,14 @@ def guardar_estado(estado):
 
 def enviar_telegram(mensagem):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-
     resposta = requests.post(
         url,
         json={
             "chat_id": CHAT_ID,
             "text": mensagem,
-            "disable_web_page_preview": True
+            "disable_web_page_preview": True,
         },
-        timeout=TIMEOUT
+        timeout=TIMEOUT,
     )
     resposta.raise_for_status()
 
@@ -71,24 +71,38 @@ def consultar_odds(liga):
         params={
             "apiKey": API_KEY,
             "regions": REGIONS,
-            "markets": "h2h,totals,btts",
+            "markets": "h2h,totals",
             "oddsFormat": "decimal",
-            "dateFormat": "iso"
+            "dateFormat": "iso",
         },
-        timeout=TIMEOUT
+        timeout=TIMEOUT,
+    )
+
+    print("Código HTTP Odds API:", resposta.status_code)
+    print(
+        "Créditos utilizados:",
+        resposta.headers.get("x-requests-used", "não indicado"),
+    )
+    print(
+        "Créditos restantes:",
+        resposta.headers.get("x-requests-remaining", "não indicado"),
     )
 
     if resposta.status_code != 200:
         raise RuntimeError(
             f"Odds API HTTP {resposta.status_code}: "
-            f"{resposta.text[:250]}"
+            f"{resposta.text[:400]}"
         )
 
-    return resposta.json(), resposta.headers
+    dados = resposta.json()
+    if not isinstance(dados, list):
+        raise RuntimeError("A resposta de odds não tem o formato esperado.")
+
+    return dados
 
 
-def melhor_odd(evento, mercado_chave):
-    opcoes = []
+def recolher_resultados(evento, mercado_chave):
+    resultados = {}
 
     for casa in evento.get("bookmakers", []):
         for mercado in casa.get("markets", []):
@@ -96,114 +110,89 @@ def melhor_odd(evento, mercado_chave):
                 continue
 
             for resultado in mercado.get("outcomes", []):
+                nome = resultado.get("name")
                 odd = resultado.get("price")
 
-                if isinstance(odd, (int, float)) and odd > 1:
-                    opcoes.append({
-                        "nome": resultado.get("name", ""),
+                if not nome or not isinstance(odd, (int, float)) or odd <= 1:
+                    continue
+
+                ponto = resultado.get("point")
+                chave = (nome, ponto)
+
+                atual = resultados.get(chave)
+                if atual is None or odd > atual["odd"]:
+                    resultados[chave] = {
+                        "nome": nome,
                         "odd": float(odd),
                         "casa": casa.get("title", "Casa desconhecida"),
-                        "ponto": resultado.get("point")
-                    })
+                        "ponto": ponto,
+                    }
 
-    return max(opcoes, key=lambda x: x["odd"]) if opcoes else None
+    return resultados
 
 
 def analisar_evento(evento, nome_liga):
-    casa = evento.get("home_team", "Equipa da casa")
-    fora = evento.get("away_team", "Equipa visitante")
-    nome_jogo = f"{casa} - {fora}"
+    casa = evento.get("home_team")
+    fora = evento.get("away_team")
 
+    if not casa or not fora:
+        return None
+
+    h2h = recolher_resultados(evento, "h2h")
+    totais = recolher_resultados(evento, "totals")
     mercados = []
 
-    # 1X2: apresenta a melhor odd de cada resultado.
-    resultados_1x2 = []
-    for equipa in [casa, "Draw", fora]:
-        melhor = None
+    # Probabilidades 1X2 ajustadas para remover aproximadamente
+    # a margem da casa, usando as melhores odds disponíveis.
+    nomes_esperados = [casa, "Draw", fora]
+    selecoes = [h2h.get((nome, None)) for nome in nomes_esperados]
 
-        for bookmaker in evento.get("bookmakers", []):
-            for mercado in bookmaker.get("markets", []):
-                if mercado.get("key") != "h2h":
-                    continue
-
-                for resultado in mercado.get("outcomes", []):
-                    if resultado.get("name") == equipa:
-                        odd = resultado.get("price")
-                        if isinstance(odd, (int, float)) and odd > 1:
-                            if melhor is None or odd > melhor["odd"]:
-                                melhor = {
-                                    "nome": equipa,
-                                    "odd": float(odd),
-                                    "casa": bookmaker.get("title", "")
-                                }
-
-        if melhor:
-            resultados_1x2.append(melhor)
-
-    # Estimativa de probabilidades 1X2 sem margem da casa.
-    if len(resultados_1x2) == 3:
-        soma = sum(1 / item["odd"] for item in resultados_1x2)
+    if all(selecoes):
+        soma = sum(1 / item["odd"] for item in selecoes)
 
         if soma > 0:
-            probabilidades = [
-                (item["nome"], (1 / item["odd"]) / soma * 100, item["odd"])
-                for item in resultados_1x2
-            ]
+            probabilidades = {
+                item["nome"]: (1 / item["odd"]) / soma
+                for item in selecoes
+            }
 
-            favorito = max(probabilidades, key=lambda x: x[1])
-            mercados.append(
-                f"1X2: {favorito[0]} | odd {favorito[2]:.2f} "
-                f"| prob. implícita ajustada {favorito[1]:.1f}%"
+            favorito = max(
+                selecoes,
+                key=lambda item: probabilidades[item["nome"]]
             )
-
-            # Dupla possibilidade calculada a partir das probabilidades 1X2.
-            prob_casa = next(p for n, p, _ in probabilidades if n == casa)
-            prob_empate = next(p for n, p, _ in probabilidades if n == "Draw")
-            prob_fora = next(p for n, p, _ in probabilidades if n == fora)
-
-            dupla = max(
-                ("1X", prob_casa + prob_empate),
-                ("X2", prob_fora + prob_empate),
-                key=lambda x: x[1]
-            )
+            prob_favorito = probabilidades[favorito["nome"]] * 100
 
             mercados.append(
-                f"Dupla possibilidade estimada: {dupla[0]} "
-                f"({dupla[1]:.1f}%)"
+                f"🎯 1X2: {favorito['nome']} — odd {favorito['odd']:.2f}"
+            )
+            mercados.append(
+                f"📊 Probabilidade de mercado ajustada: "
+                f"{prob_favorito:.1f}%"
             )
 
-    # Mais de 2,5 golos: usa o mercado totals se a linha existir.
-    over25 = None
-    for bookmaker in evento.get("bookmakers", []):
-        for mercado in bookmaker.get("markets", []):
-            if mercado.get("key") != "totals":
-                continue
+            # Dupla possibilidade calculada a partir do 1X2.
+            prob_1x = (
+                probabilidades[casa] + probabilidades["Draw"]
+            ) * 100
+            prob_x2 = (
+                probabilidades[fora] + probabilidades["Draw"]
+            ) * 100
 
-            for resultado in mercado.get("outcomes", []):
-                if (
-                    resultado.get("name", "").lower() == "over"
-                    and resultado.get("point") == 2.5
-                ):
-                    odd = resultado.get("price")
-                    if isinstance(odd, (int, float)) and odd > 1:
-                        if over25 is None or odd > over25["odd"]:
-                            over25 = {
-                                "odd": float(odd),
-                                "casa": bookmaker.get("title", "")
-                            }
+            if prob_1x >= prob_x2:
+                mercados.append(
+                    f"🔁 Dupla possibilidade estimada: 1X ({prob_1x:.1f}%)"
+                )
+            else:
+                mercados.append(
+                    f"🔁 Dupla possibilidade estimada: X2 ({prob_x2:.1f}%)"
+                )
 
+    # Mais de 2,5 golos: exige uma linha Over 2.5.
+    over25 = totais.get(("Over", 2.5))
     if over25:
         mercados.append(
-            f"Mais de 2,5 golos: odd {over25['odd']:.2f} "
+            f"⚽ Mais de 2,5 golos: odd {over25['odd']:.2f} "
             f"({over25['casa']})"
-        )
-
-    # Ambas marcam: só apresenta se a API devolver esse mercado.
-    btts = melhor_odd(evento, "btts")
-    if btts:
-        mercados.append(
-            f"Ambas marcam — {btts['nome']}: "
-            f"odd {btts['odd']:.2f} ({btts['casa']})"
         )
 
     if not mercados:
@@ -212,17 +201,17 @@ def analisar_evento(evento, nome_liga):
     inicio = evento.get("commence_time", "")
     return {
         "liga": nome_liga,
-        "jogo": nome_jogo,
+        "jogo": f"{casa} - {fora}",
         "inicio": inicio,
-        "mercados": mercados
+        "mercados": mercados,
     }
 
 
 def main():
     if not API_KEY or not BOT_TOKEN or not CHAT_ID:
         raise RuntimeError(
-            "Confirma os secrets ODDS_API_KEY, "
-            "TELEGRAM_BOT_TOKEN e TELEGRAM_CHAT_ID."
+            "Falta um dos secrets: ODDS_API_KEY, "
+            "TELEGRAM_BOT_TOKEN ou TELEGRAM_CHAT_ID."
         )
 
     hoje = datetime.now(timezone.utc).date().isoformat()
@@ -231,27 +220,22 @@ def main():
     if estado.get("data") != hoje:
         estado = {"data": hoje, "pedidos": 0}
 
-    # Rotação diária: uma liga por dia para poupar créditos.
-    # Ao fim de 8 dias, todas as ligas terão sido consultadas.
+    if estado.get("pedidos", 0) >= 1:
+        print(
+            "A consulta diária já foi registada. "
+            "Não será feita outra consulta para evitar gastar créditos."
+        )
+        return
+
+    # Rotação: consulta uma das oito ligas por dia.
     indice = datetime.now(timezone.utc).date().toordinal() % len(LIGAS)
     nome_liga, chave_liga = LIGAS[indice]
 
-    # Limite de segurança: no máximo 1 consulta Odds API por execução.
-    if estado["pedidos"] >= 1:
-        print("Limite diário desta execução já atingido.")
-        return
-
-    # Regista antes da consulta para evitar repetições em caso de erro.
-    estado["pedidos"] += 1
+    # Regista antes do pedido para reduzir o risco de repetição.
+    estado["pedidos"] = 1
     guardar_estado(estado)
 
-    eventos, headers = consultar_odds(chave_liga)
-
-    print("Liga consultada:", nome_liga)
-    print("Pedidos restantes:", headers.get("x-requests-remaining", "não indicado"))
-    print("Créditos usados:", headers.get("x-requests-used", "não indicado"))
-    print("Eventos recebidos:", len(eventos))
-
+    eventos = consultar_odds(chave_liga)
     agora = datetime.now(timezone.utc)
     candidatos = []
 
@@ -260,7 +244,7 @@ def main():
             inicio = datetime.fromisoformat(
                 evento["commence_time"].replace("Z", "+00:00")
             )
-        except (KeyError, ValueError):
+        except (KeyError, ValueError, TypeError):
             continue
 
         if inicio <= agora:
@@ -270,22 +254,24 @@ def main():
         if analise:
             candidatos.append(analise)
 
-    # Até 5 jogos, sem afirmar que são apostas de valor garantido.
+    candidatos.sort(key=lambda item: item["inicio"])
     candidatos = candidatos[:MAX_SUGESTOES]
 
     linhas = [
         "⚽ RB TIPS | AI FOOTBALL",
         f"📅 {datetime.now().strftime('%d/%m/%Y')}",
-        f"🏆 Liga analisada: {nome_liga}",
+        f"🏆 Competição analisada: {nome_liga}",
         "",
-        "Odds pré-jogo e estimativas estatísticas.",
-        "As probabilidades refletem o mercado, não um modelo validado.",
-        ""
+        "📌 Mercados com odds reais: 1X2 e Mais de 2,5 golos,",
+        "quando disponíveis.",
+        "🔁 Dupla possibilidade: probabilidade derivada do 1X2.",
+        "🚫 Ambas marcam: sem odds nesta versão.",
+        "",
     ]
 
     if not candidatos:
         linhas.append(
-            "Hoje não foram encontrados jogos futuros com odds suficientes."
+            "Não foram encontrados jogos futuros com mercados suficientes."
         )
     else:
         for numero, jogo in enumerate(candidatos, start=1):
@@ -295,14 +281,13 @@ def main():
             if jogo["inicio"]:
                 linhas.append(f"🕒 {jogo['inicio']}")
 
-            for mercado in jogo["mercados"]:
-                linhas.append(f"• {mercado}")
-
+            linhas.extend(f"• {mercado}" for mercado in jogo["mercados"])
             linhas.append("")
 
     linhas.append(
-        "⚠️ Informação estatística, não garantia de resultado. "
-        "Aposta apenas com responsabilidade."
+        "⚠️ As probabilidades refletem o mercado e não um modelo "
+        "independente validado. Não há garantia de lucro. "
+        "Aposta com responsabilidade."
     )
 
     enviar_telegram("\n".join(linhas))
