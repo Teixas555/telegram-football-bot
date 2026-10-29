@@ -5,10 +5,7 @@ from pathlib import Path
 
 import requests
 
-# Fonte pública de resultados Bac Bo
 API_URL = "https://cassinostats.com/api/history/bac-bo"
-
-# Ficheiro para guardar o estado e evitar sinais duplicados
 STATE_FILE = Path("bacbo_results.json")
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -17,15 +14,35 @@ CHAT_ID = os.getenv("CASINO_CHAT_ID")
 
 def carregar_estado():
     if not STATE_FILE.exists():
-        return {}
+        return {
+            "ultima_sequencia_enviada": None,
+            "ultima_ronda_verificada": None,
+            "sinais": [],
+        }
 
     try:
         with STATE_FILE.open("r", encoding="utf-8") as f:
             estado = json.load(f)
-        return estado if isinstance(estado, dict) else {}
+
+        if not isinstance(estado, dict):
+            estado = {}
+
+        estado.setdefault("ultima_sequencia_enviada", None)
+        estado.setdefault("ultima_ronda_verificada", None)
+        estado.setdefault("sinais", [])
+
+        if not isinstance(estado["sinais"], list):
+            estado["sinais"] = []
+
+        return estado
+
     except (OSError, json.JSONDecodeError):
-        print("Aviso: não foi possível ler o estado anterior.")
-        return {}
+        print("Aviso: não foi possível ler o histórico.")
+        return {
+            "ultima_sequencia_enviada": None,
+            "ultima_ronda_verificada": None,
+            "sinais": [],
+        }
 
 
 def guardar_estado(estado):
@@ -34,7 +51,7 @@ def guardar_estado(estado):
 
 
 def obter_resultados():
-    print("A consultar a fonte pública de Bac Bo...")
+    print("A consultar os resultados de Bac Bo...")
 
     resposta = requests.get(
         API_URL,
@@ -50,44 +67,60 @@ def obter_resultados():
     dados = resposta.json()
 
     if dados.get("available") is not True:
-        raise RuntimeError("O histórico Bac Bo está indisponível.")
+        raise RuntimeError("Histórico Bac Bo indisponível.")
 
     rondas = dados.get("rounds")
 
     if not isinstance(rondas, list) or not rondas:
-        raise RuntimeError("A fonte não devolveu resultados.")
+        raise RuntimeError("A fonte não devolveu rondas.")
 
     validas = [
-        ronda for ronda in rondas
-        if isinstance(ronda, dict)
-        and ronda.get("outcome") in ("P", "B", "T")
-        and ronda.get("id") is not None
+        r for r in rondas
+        if isinstance(r, dict)
+        and r.get("outcome") in ("P", "B", "T")
+        and r.get("id") is not None
     ]
 
     if not validas:
         raise RuntimeError("Não existem resultados válidos.")
 
-    print("Resultados válidos recebidos:", len(validas))
-    print(
-        "Últimos resultados:",
-        [r["outcome"] for r in validas[:10]]
-    )
+    print("Rondas recebidas:", len(validas))
+    print("Últimos resultados:", [r["outcome"] for r in validas[:10]])
 
     return validas
 
 
-def encontrar_sequencia(rondas):
-    # A fonte apresenta a ronda mais recente primeiro.
-    # P = Player, B = Banker, T = empate.
-    # Os empates são ignorados na contagem.
+def enviar_telegram(mensagem):
+    if not BOT_TOKEN or not CHAT_ID:
+        raise RuntimeError(
+            "Faltam os secrets TELEGRAM_BOT_TOKEN ou CASINO_CHAT_ID."
+        )
 
+    resposta = requests.post(
+        f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+        json={"chat_id": CHAT_ID, "text": mensagem},
+        timeout=25,
+    )
+    resposta.raise_for_status()
+
+    dados = resposta.json()
+
+    if not dados.get("ok"):
+        raise RuntimeError(
+            "Erro do Telegram: "
+            + str(dados.get("description", "erro desconhecido"))
+        )
+
+    print("Mensagem enviada ao Telegram.")
+
+
+def encontrar_sequencia(rondas):
     resultados = [
-        ronda for ronda in rondas
-        if ronda["outcome"] in ("P", "B")
+        r for r in rondas
+        if r["outcome"] in ("P", "B")
     ]
 
     if len(resultados) < 3:
-        print("Ainda não existem 3 resultados não empatados.")
         return None
 
     lado = resultados[0]["outcome"]
@@ -101,21 +134,126 @@ def encontrar_sequencia(rondas):
         contagem += 1
         inicio_id = ronda["id"]
 
-    print("Lado da sequência:", "PLAYER" if lado == "P" else "BANKER")
-    print("Resultados consecutivos:", contagem)
+    print("Sequência atual:", contagem)
 
     if contagem < 3:
-        print("Sem entrada: não há 3 resultados consecutivos iguais.")
         return None
 
     return lado, inicio_id
 
 
-def enviar_sinal(lado):
-    if not BOT_TOKEN or not CHAT_ID:
-        raise RuntimeError(
-            "Falta configurar TELEGRAM_BOT_TOKEN ou CASINO_CHAT_ID."
+def avaliar_sinais_pendentes(rondas, estado):
+    # A fonte apresenta as rondas da mais recente para a mais antiga.
+    ids = [str(r["id"]) for r in rondas]
+    alterado = False
+
+    for sinal in estado["sinais"]:
+        if sinal.get("estado") != "PENDENTE":
+            continue
+
+        id_sinal = str(sinal["ronda_sinal_id"])
+
+        if id_sinal not in ids:
+            print(
+                "Sinal pendente: a ronda original já não está "
+                "disponível no histórico."
+            )
+            continue
+
+        indice = ids.index(id_sinal)
+        rondas_posteriores = rondas[:indice]
+
+        if not rondas_posteriores:
+            continue
+
+        # A última das rondas mais recentes é a primeira
+        # que ocorreu depois da ronda em que foi emitido o sinal.
+        resultado = rondas_posteriores[-1]["outcome"]
+
+        if resultado == "T":
+            sinal["estado"] = "EMPATE"
+        elif resultado == sinal["lado"]:
+            sinal["estado"] = "WIN"
+        else:
+            sinal["estado"] = "LOSS"
+
+        sinal["resultado_observado"] = resultado
+        alterado = True
+
+        nome_lado = "PLAYER" if sinal["lado"] == "P" else "BANKER"
+        nome_resultado = {
+            "P": "PLAYER",
+            "B": "BANKER",
+            "T": "EMPATE",
+        }[resultado]
+
+        mensagem = (
+            "🎲 RB TIPS CASINO AI\n\n"
+            f"📊 Resultado do sinal: {sinal['estado']}\n"
+            f"📌 Entrada: {nome_lado}\n"
+            f"🎯 Resultado seguinte: {nome_resultado}\n"
+            "ℹ️ Registo experimental; não garante lucro."
         )
+
+        enviar_telegram(mensagem)
+
+    return alterado
+
+
+def enviar_estatisticas(estado):
+    avaliados = [
+        s for s in estado["sinais"]
+        if s.get("estado") in ("WIN", "LOSS", "EMPATE")
+    ]
+
+    wins = sum(s["estado"] == "WIN" for s in avaliados)
+    losses = sum(s["estado"] == "LOSS" for s in avaliados)
+    empates = sum(s["estado"] == "EMPATE" for s in avaliados)
+    pendentes = sum(
+        s.get("estado") == "PENDENTE" for s in estado["sinais"]
+    )
+
+    decididos = wins + losses
+    taxa = (wins / decididos * 100) if decididos else 0
+
+    mensagem = (
+        "📈 RB TIPS CASINO AI — ESTATÍSTICAS\n\n"
+        f"🔢 Sinais registados: {len(estado['sinais'])}\n"
+        f"✅ WIN: {wins}\n"
+        f"❌ LOSS: {losses}\n"
+        f"🤝 EMPATE: {empates}\n"
+        f"⏳ Pendentes: {pendentes}\n"
+        f"🎯 Taxa de acerto (sem empates): {taxa:.1f}%\n\n"
+        "ℹ️ Estatísticas experimentais, sem garantia de lucro."
+    )
+
+    enviar_telegram(mensagem)
+
+
+def main():
+    print("=== RB TIPS CASINO AI ===")
+
+    rondas = obter_resultados()
+    estado = carregar_estado()
+
+    # Avaliar primeiro sinais que já existiam.
+    avaliar_sinais_pendentes(rondas, estado)
+
+    sequencia = encontrar_sequencia(rondas)
+
+    if sequencia is None:
+        print("Sem entrada: não há três resultados iguais.")
+        estado["ultima_ronda_verificada"] = str(rondas[0]["id"])
+        guardar_estado(estado)
+        return
+
+    lado, inicio_id = sequencia
+    chave = f"{lado}:{inicio_id}"
+
+    if estado.get("ultima_sequencia_enviada") == chave:
+        print("Esta sequência já foi sinalizada.")
+        guardar_estado(estado)
+        return
 
     nome = "PLAYER" if lado == "P" else "BANKER"
 
@@ -124,68 +262,26 @@ def enviar_sinal(lado):
         f"📌 ENTRADA EXPERIMENTAL: {nome}\n"
         "🎯 Jogo: Bac Bo\n"
         "📊 Regra: 3 resultados consecutivos iguais\n"
-        "⚠️ Sinal experimental; não garante acerto nem lucro."
+        "⚠️ Não existe garantia de acerto ou lucro."
     )
 
-    resposta = requests.post(
-        f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-        json={
-            "chat_id": CHAT_ID,
-            "text": mensagem,
-        },
-        timeout=25,
-    )
-    resposta.raise_for_status()
+    # O sinal é registado como pendente e avaliado
+    # quando a fonte disponibilizar uma ronda posterior.
+    enviar_telegram(mensagem)
 
-    dados = resposta.json()
+    estado["sinais"].append({
+        "lado": lado,
+        "ronda_sinal_id": str(rondas[0]["id"]),
+        "sequencia_inicio_id": str(inicio_id),
+        "estado": "PENDENTE",
+        "resultado_observado": None,
+    })
 
-    if not dados.get("ok"):
-        raise RuntimeError(
-            "O Telegram recusou o envio: "
-            + str(dados.get("description", "erro desconhecido"))
-        )
-
-    print("Telegram confirmou o envio do sinal:", nome)
-
-
-def main():
-    print("===================================")
-    print("RB TIPS CASINO AI - INÍCIO")
-    print("===================================")
-
-    rondas = obter_resultados()
-    estado = carregar_estado()
-
-    ronda_mais_recente = rondas[0]["id"]
-    print("ID da ronda mais recente:", ronda_mais_recente)
-
-    sequencia = encontrar_sequencia(rondas)
-
-    if sequencia is None:
-        print("Nenhuma entrada encontrada.")
-        estado["ultima_ronda_verificada"] = ronda_mais_recente
-        guardar_estado(estado)
-        return
-
-    lado, inicio_id = sequencia
-    chave = f"{lado}:{inicio_id}"
-
-    if estado.get("ultima_sequencia_enviada") == chave:
-        print("Esta sequência já foi sinalizada. Sem mensagem duplicada.")
-        estado["ultima_ronda_verificada"] = ronda_mais_recente
-        guardar_estado(estado)
-        return
-
-    print("A tentar enviar o sinal para o Telegram...")
-    enviar_sinal(lado)
-
-    # Guardar apenas depois de o Telegram confirmar o envio.
     estado["ultima_sequencia_enviada"] = chave
-    estado["ultima_ronda_verificada"] = ronda_mais_recente
-    guardar_estado(estado)
+    estado["ultima_ronda_verificada"] = str(rondas[0]["id"])
 
-    print("Sinal enviado e estado guardado.")
-    print("RB TIPS CASINO AI - FIM")
+    guardar_estado(estado)
+    print("Sinal guardado no histórico.")
 
 
 if __name__ == "__main__":
