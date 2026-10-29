@@ -3,42 +3,67 @@ import re
 import requests
 from urllib.parse import urljoin
 
-URL = "https://cassinostats.com/pt/jogo/bac-bo/estatisticas"
+BASE = "https://cassinostats.com"
+PAGINA = BASE + "/pt/jogo/bac-bo/estatisticas"
 
 def main():
-    print("A procurar fontes de dados do Bac Bo...")
+    print("A investigar o código público do Cassino Stats...")
 
-    resposta = requests.get(
-        URL,
-        headers={"User-Agent": "Mozilla/5.0"},
-        timeout=30,
-    )
-    print("HTTP:", resposta.status_code)
+    sessao = requests.Session()
+    sessao.headers["User-Agent"] = "Mozilla/5.0"
+
+    resposta = sessao.get(PAGINA, timeout=30)
+    print("Página HTTP:", resposta.status_code)
     resposta.raise_for_status()
 
-    html = resposta.text
-
-    print("\n--- Ficheiros JavaScript ---")
     scripts = re.findall(
         r'<script[^>]+src=["\']([^"\']+)',
-        html,
+        resposta.text,
         re.IGNORECASE,
     )
-    for src in scripts[:25]:
-        print(urljoin(URL, src))
 
-    print("\n--- Referências a possíveis fontes de dados ---")
-    padrao = r"""["']([^"'\\\s]{0,180}(?:/api/|graphql|websocket|bac.bo|bac-bo|history|results|resultados)[^"'\\\s]{0,180})["']"""
+    termos = ["/api/sinal", "/api/pausa", "fetch(", "axios", "bac-bo"]
 
-    encontrados = sorted(set(re.findall(padrao, html, re.IGNORECASE)))
+    encontrados = 0
 
-    for item in encontrados[:60]:
-        print(item)
+    for caminho in scripts:
+        url = urljoin(BASE, caminho)
 
-    if not encontrados:
-        print("Não foram encontradas referências óbvias.")
+        try:
+            r = sessao.get(url, timeout=20)
+            if r.status_code != 200:
+                continue
 
-    print("\nFim do teste. Nenhuma mensagem foi enviada.")
+            codigo = r.text
+
+            for termo in termos:
+                inicio = 0
+                while True:
+                    pos = codigo.lower().find(termo.lower(), inicio)
+                    if pos == -1:
+                        break
+
+                    excerto = codigo[max(0, pos - 250):pos + 350]
+                    excerto = re.sub(r"\s+", " ", excerto)
+
+                    print("\nFicheiro:", caminho)
+                    print("Termo:", termo)
+                    print("Contexto:", excerto[:600])
+
+                    encontrados += 1
+                    inicio = pos + len(termo)
+
+                    if encontrados >= 30:
+                        print("\nLimite de resultados atingido.")
+                        return
+
+        except requests.RequestException:
+            continue
+
+    if encontrados == 0:
+        print("Não foram encontrados contextos relevantes.")
+
+    print("\nInvestigação concluída.")
 
 if __name__ == "__main__":
     main()
