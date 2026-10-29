@@ -1,40 +1,44 @@
 
 import re
 import requests
-from html import unescape
+from urllib.parse import urljoin
 
 URL = "https://cassinostats.com/pt/jogo/bac-bo/estatisticas"
 
 def main():
-    print("A testar a fonte gratuita Cassino Stats...")
+    print("A procurar fontes de dados do Bac Bo...")
 
-    try:
-        resposta = requests.get(
-            URL,
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=25,
-        )
+    resposta = requests.get(
+        URL,
+        headers={"User-Agent": "Mozilla/5.0"},
+        timeout=30,
+    )
+    print("HTTP:", resposta.status_code)
+    resposta.raise_for_status()
 
-        print("Código HTTP:", resposta.status_code)
-        resposta.raise_for_status()
+    html = resposta.text
 
-        html = resposta.text
-        texto = unescape(re.sub(r"<[^>]+>", " ", html))
-        texto = re.sub(r"\s+", " ", texto)
+    print("\n--- Ficheiros JavaScript ---")
+    scripts = re.findall(
+        r'<script[^>]+src=["\']([^"\']+)',
+        html,
+        re.IGNORECASE,
+    )
+    for src in scripts[:25]:
+        print(urljoin(URL, src))
 
-        print("Tamanho da página:", len(html))
-        print("\nResultados encontrados:")
+    print("\n--- Referências a possíveis fontes de dados ---")
+    padrao = r"""["']([^"'\\\s]{0,180}(?:/api/|graphql|websocket|bac.bo|bac-bo|history|results|resultados)[^"'\\\s]{0,180})["']"""
 
-        for palavra in ["Player", "Banker", "Empate", "Últimos resultados"]:
-            print(f"{palavra}: {'SIM' if palavra.lower() in texto.lower() else 'NÃO'}")
+    encontrados = sorted(set(re.findall(padrao, html, re.IGNORECASE)))
 
-        print("\nExcerto da página:")
-        print(texto[:2500])
+    for item in encontrados[:60]:
+        print(item)
 
-        print("\nTeste concluído.")
+    if not encontrados:
+        print("Não foram encontradas referências óbvias.")
 
-    except requests.RequestException as erro:
-        print("Falha ao consultar a página:", erro)
+    print("\nFim do teste. Nenhuma mensagem foi enviada.")
 
 if __name__ == "__main__":
     main()
