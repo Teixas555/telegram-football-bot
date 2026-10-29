@@ -1,4 +1,14 @@
 {
   "data": "2026-10-29",
-  "pedidos": 1
+  "pedidos": 1,
+  "ligas_consultadas": [
+    "soccer_epl",
+    "soccer_france_ligue_one",
+    "soccer_germany_bundesliga",
+    "soccer_italy_serie_a",
+    "soccer_spain_la_liga",
+    "soccer_uefa_champs_league",
+    "soccer_uefa_europa_conference_league",
+    "soccer_uefa_europa_league"
+  ]
 }
