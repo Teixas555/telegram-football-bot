@@ -6,64 +6,70 @@ from urllib.parse import urljoin
 BASE = "https://cassinostats.com"
 PAGINA = BASE + "/pt/jogo/bac-bo/estatisticas"
 
-def main():
-    print("A investigar o código público do Cassino Stats...")
+TERMOS = [
+    "bac-bo",
+    "historico",
+    "últimos resultados",
+    "ultimos resultados",
+    "player",
+    "banker",
+    "rounds",
+    "history",
+    "resultados",
+    "dataset",
+    "api/",
+]
 
+def main():
     sessao = requests.Session()
     sessao.headers["User-Agent"] = "Mozilla/5.0"
 
-    resposta = sessao.get(PAGINA, timeout=30)
-    print("Página HTTP:", resposta.status_code)
-    resposta.raise_for_status()
+    pagina = sessao.get(PAGINA, timeout=30)
+    print("Página HTTP:", pagina.status_code)
+    pagina.raise_for_status()
 
     scripts = re.findall(
         r'<script[^>]+src=["\']([^"\']+)',
-        resposta.text,
+        pagina.text,
         re.IGNORECASE,
     )
 
-    termos = ["/api/sinal", "/api/pausa", "fetch(", "axios", "bac-bo"]
-
-    encontrados = 0
+    vistos = set()
 
     for caminho in scripts:
         url = urljoin(BASE, caminho)
+        if url in vistos:
+            continue
+        vistos.add(url)
 
         try:
-            r = sessao.get(url, timeout=20)
-            if r.status_code != 200:
+            resposta = sessao.get(url, timeout=20)
+            if resposta.status_code != 200:
                 continue
-
-            codigo = r.text
-
-            for termo in termos:
-                inicio = 0
-                while True:
-                    pos = codigo.lower().find(termo.lower(), inicio)
-                    if pos == -1:
-                        break
-
-                    excerto = codigo[max(0, pos - 250):pos + 350]
-                    excerto = re.sub(r"\s+", " ", excerto)
-
-                    print("\nFicheiro:", caminho)
-                    print("Termo:", termo)
-                    print("Contexto:", excerto[:600])
-
-                    encontrados += 1
-                    inicio = pos + len(termo)
-
-                    if encontrados >= 30:
-                        print("\nLimite de resultados atingido.")
-                        return
-
+            codigo = resposta.text
         except requests.RequestException:
             continue
 
-    if encontrados == 0:
-        print("Não foram encontrados contextos relevantes.")
+        achados = []
+        for termo in TERMOS:
+            if termo.lower() in codigo.lower():
+                achados.append(termo)
 
-    print("\nInvestigação concluída.")
+        if achados:
+            print("\nFicheiro:", caminho)
+            print("Termos encontrados:", ", ".join(achados))
+
+            for termo in ["historico", "ultimos resultados", "history", "dataset"]:
+                pos = codigo.lower().find(termo.lower())
+                if pos >= 0:
+                    contexto = re.sub(
+                        r"\s+", " ",
+                        codigo[max(0, pos - 180):pos + 300]
+                    )
+                    print("Contexto:", contexto[:480])
+                    break
+
+    print("\nTeste concluído. Nenhum sinal foi enviado.")
 
 if __name__ == "__main__":
     main()
